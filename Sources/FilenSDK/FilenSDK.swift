@@ -133,8 +133,8 @@ final class FilenError : Error {
 public struct SDKConfiguration : Decodable {
 //    let email: String
 //    let password: String
-    let masterKeys: [String]
-    let apiKey: String
+    public let masterKeys: [String]
+    public let apiKey: String
     var publicKey: String? = nil
     var privateKey: String? = nil
     let authVersion: Int
