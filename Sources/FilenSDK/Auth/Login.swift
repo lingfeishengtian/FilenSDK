@@ -23,7 +23,7 @@ extension FilenClient {
         
         // TODO: Support multiple keys!!!
         
-        config = SDKConfiguration(email: email, password: derivedInfo.derivedPassword, masterKeys: [derivedInfo.derivedMasterKeys], apiKey: loginResponse.apiKey, publicKey: loginResponse.publicKey, privateKey: loginResponse.privateKey, authVersion: authVersion.rawValue, baseFolderUUID: userInfo.baseFolderUUID, userId: userInfo.id)
+        config = SDKConfiguration(masterKeys: [derivedInfo.derivedMasterKeys], apiKey: loginResponse.apiKey, publicKey: loginResponse.publicKey, privateKey: loginResponse.privateKey, authVersion: authVersion.rawValue, baseFolderUUID: userInfo.baseFolderUUID, userId: userInfo.id)
     }
 }
 

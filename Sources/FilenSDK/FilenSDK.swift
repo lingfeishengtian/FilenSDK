@@ -131,14 +131,32 @@ final class FilenError : Error {
 
  */
 public struct SDKConfiguration : Decodable {
-    let email: String
-    let password: String
+//    let email: String
+//    let password: String
     let masterKeys: [String]
     let apiKey: String
-    let publicKey: String
-    let privateKey: String
+    var publicKey: String? = nil
+    var privateKey: String? = nil
     let authVersion: Int
-    let baseFolderUUID: String
-    let userId: Int
+    var baseFolderUUID: String? = nil
+    var userId: Int? = nil
+    
+    public init(masterKeys: [String], apiKey: String, publicKey: String, privateKey: String, authVersion: Int, baseFolderUUID: String, userId: Int) {
+//        self.email = email
+//        self.password = password
+        self.masterKeys = masterKeys
+        self.apiKey = apiKey
+        self.publicKey = publicKey
+        self.privateKey = privateKey
+        self.authVersion = authVersion
+        self.baseFolderUUID = baseFolderUUID
+        self.userId = userId
+    }
+    
+    public init(masterKeys: [String], apiKey: String) {
+        self.masterKeys = masterKeys
+        self.apiKey = apiKey
+        self.authVersion = 2
+    }
 }
 

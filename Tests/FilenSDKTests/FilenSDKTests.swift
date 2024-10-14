@@ -32,7 +32,7 @@ func login() async throws {
     print(FileManager.default.temporaryDirectory)
     print(client.config)
     
-    let folderContents = try await client.dirContent(uuid: client.config!.baseFolderUUID)
+    let folderContents = try await client.dirContent(uuid: client.config!.baseFolderUUID!)
     print(folderContents)
     let res = try await client.downloadFile(fileInfo: folderContents.uploads[1], url: URL(filePath: "~/Downloads/test.txt", directoryHint: .notDirectory)!.path)
     print(res)
