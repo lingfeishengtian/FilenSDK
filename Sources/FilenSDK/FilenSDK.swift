@@ -5,7 +5,7 @@ import Foundation
 import Alamofire
 import IkigaJSON
 
-class FilenClient {
+public class FilenClient {
     internal lazy var sessionConfiguration: URLSessionConfiguration = {
         let configuration = URLSessionConfiguration.af.default
         
