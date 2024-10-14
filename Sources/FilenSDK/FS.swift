@@ -1,0 +1,853 @@
+//
+//  FS.swift
+//  FilenSDK
+//
+//  Created by Hunter Han on 10/13/24.
+//
+
+import Foundation
+import Alamofire
+import UniformTypeIdentifiers
+
+@available(macCatalyst 14.0, *)
+extension FilenClient: @unchecked Sendable
+{
+    func uploadChunk (url: URL, fileURL: URL, checksum: String) async throws -> (region: String, bucket: String) {
+        guard let apiKey = config?.apiKey else {
+            throw FilenError("API key is not set.")
+        }
+        
+        let headers: HTTPHeaders = [
+            "Authorization": "Bearer \(apiKey)",
+            "Accept": "application/json",
+            "Checksum": checksum
+        ]
+        
+        let response = try await sessionManager.upload(fileURL, to: url, headers: headers){ $0.timeoutInterval = 3600 }.validate().serializingDecodable(UploadChunk.self).value
+        
+        return (region: response.region, bucket: response.bucket)
+    }
+    
+    
+    func encryptAndUploadChunk (url: String, chunkSize: Int, uuid: String, index: Int, uploadKey: String, parent: String, key: String) async throws -> (region: String, bucket: String) {
+        let fileURL = self.getTempPath().appendingPathComponent(UUID().uuidString.lowercased() + "." + uuid + "." + String(index), isDirectory: false)
+        
+        guard let inputURL = URL(string: url.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? url) else {
+            throw NSError(domain: "encryptAndUploadChunk", code: 1, userInfo: nil)
+        }
+        
+        let (_, checksum: chunkChecksum) = try FilenCrypto.shared.streamEncryptData(input: inputURL, output: fileURL, key: key, version: 2, index: index)
+        
+        // We need to serialize it to JSON this way to ensure correct ordering of parameters
+        let queryItemsJSONString = #"{"uuid":"\#(uuid.lowercased())","index":"\#(index)","uploadKey":"\#(uploadKey)","parent":"\#(parent.lowercased())","hash":"\#(chunkChecksum.lowercased())"}"#
+        
+        let queryItemsChecksum = try FilenCrypto.shared.hash(message: queryItemsJSONString, hash: .sha512)
+        
+        guard let urlWithComponents = URL(string: "https://ingest.filen.io/v3/upload?uuid=\(uuid.lowercased())&index=\(index)&uploadKey=\(uploadKey)&parent=\(parent.lowercased())&hash=\(chunkChecksum)") else {
+            throw NSError(domain: "encryptAndUploadChunk", code: 2, userInfo: nil)
+        }
+        
+        let result = try await self.uploadChunk(url: urlWithComponents, fileURL: fileURL, checksum: queryItemsChecksum)
+        
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            try FileManager.default.removeItem(atPath: fileURL.path)
+        }
+        
+        return result
+    }
+    
+    //TODO: Better way of identifying
+    private func fileExtension(from name: String) -> String? {
+        autoreleasepool {
+            let components = name.components(separatedBy: ".")
+            
+            guard components.count > 1 else {
+                return nil
+            }
+            
+            return components.last
+        }
+    }
+    
+    func uploadFile (url: String, parent: String) async throws -> ItemJSON {
+        if (!FileManager.default.fileExists(atPath: url)) {
+            throw FilenError("No such file")
+        }
+        
+        guard let masterKeys = self.masterKeys(), let lastMasterKey = masterKeys.last else {
+            throw FilenError("Unauthorized")
+        }
+        
+        try await self.uploadSemaphore.acquire()
+        
+        defer {
+            self.uploadSemaphore.release()
+        }
+        
+        let stat = try FileManager.default.attributesOfItem(atPath: url)
+        
+        guard let fileSize = stat[.size] as? Int, let fileURL = URL(string: url.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? url), let lastModified = stat[.modificationDate] as? Date else {
+            throw FilenError("No such item")
+        }
+        
+        let key = try FilenCrypto.shared.generateRandomString(length: 32)
+        let lastModifiedInt = Int(lastModified.timeIntervalSince1970 * 1000)
+        
+        if (fileSize <= 0) { // We do not support 0 Byte files yet
+            throw FilenError("0 Byte Files are not supported")
+        }
+        
+        let uuid = UUID().uuidString.lowercased()
+        let fileName = fileURL.lastPathComponent
+        var dummyOffset = 0
+        var fileChunks = 0
+        let chunkSizeToUse = 1024 * 1024
+        let ext = self.fileExtension(from: fileName) ?? ""
+        let mimeType = UTType(filenameExtension: ext)?.preferredMIMEType ?? ""
+        
+        while (dummyOffset < fileSize) {
+            fileChunks += 1
+            dummyOffset += chunkSizeToUse
+        }
+        
+        let metadataJSON = try self.jsonEncoder.encode(
+            FileMetadata(
+                name: fileName,
+                size: fileSize,
+                mime: mimeType,
+                key: key,
+                lastModified: lastModifiedInt
+            )
+        )
+        
+        guard let metadataJSONString = String(data: metadataJSON, encoding: .utf8) else {
+            throw FilenError("No such item")
+        }
+        
+        let rm = try FilenCrypto.shared.generateRandomString(length: 32)
+        let uploadKey = try FilenCrypto.shared.generateRandomString(length: 32)
+        let nameEnc = try FilenCrypto.shared.encryptMetadata(metadata: fileName, key: key)
+        let mimeEnc = try FilenCrypto.shared.encryptMetadata(metadata: mimeType, key: key)
+        let nameHashed = try FilenCrypto.shared.hashFn(message: fileName.lowercased())
+        let sizeEnc = try FilenCrypto.shared.encryptMetadata(metadata: String(fileSize), key: key)
+        let metadata = try FilenCrypto.shared.encryptMetadata(metadata: metadataJSONString, key: lastMasterKey)
+        
+        let uploadFileResult = UploadFileResult()
+        
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for index in 0..<fileChunks {
+                autoreleasepool {
+                    group.addTask { [transferSemaphore = self.transferSemaphore] in
+                        try await transferSemaphore.acquire()
+
+                        defer {
+                            transferSemaphore.release()
+                        }
+                        
+                        let result = try await self.encryptAndUploadChunk(url: url, chunkSize: chunkSizeToUse, uuid: uuid, index: index, uploadKey: uploadKey, parent: parent, key: key)
+//                        
+                        if (result.bucket.count > 0 && result.region.count > 0) {
+                            await uploadFileResult.set(bucket: result.bucket, region: result.region)
+                        }
+                    }
+                }
+            }
+            
+            for try await _ in group {}
+        }
+        
+        let bucket = await uploadFileResult.bucket
+        let region = await uploadFileResult.region
+        
+        /*for index in 0..<fileChunks {
+         let result = try await self.encryptAndUploadChunk(
+         url: url,
+         chunkSize: chunkSizeToUse,
+         uuid: uuid,
+         index: index,
+         uploadKey: uploadKey,
+         parent: parent,
+         key: key
+         )
+         
+         if (result.bucket.count > 0 && result.region.count > 0) {
+         bucket = result.bucket
+         region = result.region
+         }
+         }*/
+        
+        let done = try await self.markUploadAsDone(
+            uuid: uuid,
+            name: nameEnc,
+            nameHashed: nameHashed,
+            size: sizeEnc,
+            chunks: fileChunks,
+            mime: mimeEnc,
+            rm: rm,
+            metadata: metadata,
+            version: 2,
+            uploadKey: uploadKey
+        )
+        
+        try await checkIfItemParentIsShared(
+            type: "file",
+            parent: parent,
+            itemMetadata: CheckIfItemParentIsSharedMetadata(
+                uuid: uuid,
+                name: fileName,
+                size: fileSize,
+                mime: mimeType,
+                key: key,
+                lastModified: lastModifiedInt
+            )
+        )
+        
+        return ItemJSON(
+            uuid: uuid,
+            parent: parent,
+            name: fileName,
+            type: "file",
+            mime: mimeType,
+            size: fileSize,
+            timestamp: Int(Date().timeIntervalSince1970),
+            lastModified: lastModifiedInt,
+            key: key,
+            chunks: done.chunks,
+            region: region,
+            bucket: bucket,
+            version: 2
+        )
+    }
+    
+    func markUploadAsDone (uuid: String, name: String, nameHashed: String, size: String, chunks: Int, mime: String, rm: String, metadata: String, version: Int, uploadKey: String) async throws -> MarkUploadAsDone {
+        let response: MarkUploadAsDone = try await self.apiRequest(
+            endpoint: "/v3/upload/done",
+            method: .post,
+            //        body: [
+            //          "uuid": uuid,
+            //          "name": name,
+            //          "nameHashed": nameHashed,
+            //          "size": size,
+            //          "chunks": chunks,
+            //          "mime": mime,
+            //          "rm": rm,
+            //          "metadata": metadata,
+            //          "version": version,
+            //          "uploadKey": uploadKey
+            //        ]
+            body: MarkUploadAsDoneBody(uuid: uuid, name: name, nameHashed: nameHashed, size: size, chunks: chunks, mime: mime, rm: rm, metadata: metadata, version: version, uploadKey: uploadKey)
+        )
+        
+        
+        
+        return response
+    }
+    
+    func isSharingFolder (uuid: String) async throws -> IsSharingFolder {
+        let response: IsSharingFolder = try await self.apiRequest(
+            endpoint: "/v3/dir/shared",
+            method: .post,
+            body: [
+                "uuid": uuid
+            ]
+        )
+        
+        
+        
+        return response
+    }
+    
+    func isLinkingFolder (uuid: String) async throws -> IsLinkingFolder {
+        let response: IsLinkingFolder = try await self.apiRequest(
+            endpoint: "/v3/dir/linked",
+            method: .post,
+            body: [
+                "uuid": uuid
+            ]
+        )
+        
+        
+        
+        return response
+    }
+    
+    func shareItem (uuid: String, parent: String, email: String, type: String, metadata: String) async throws -> Void {
+        let response: BaseAPIResponse = try await self.apiRequestBaseAPI(
+            endpoint: "/v3/item/share",
+            method: .post,
+            body: [
+                "uuid": uuid,
+                "parent": parent,
+                "email": email,
+                "type": type,
+                "metadata": metadata
+            ]
+        )
+        
+        
+    }
+    
+    func addItemToPublicLink (uuid: String, parent: String, linkUUID: String, type: String, metadata: String, key: String, expiration: String) async throws -> Void {
+        let response: BaseAPIResponse = try await self.apiRequestBaseAPI(
+            endpoint: "/v3/dir/link/add",
+            method: .post,
+            body: [
+                "uuid": uuid,
+                "parent": parent,
+                "linkUUID": linkUUID,
+                "type": type,
+                "metadata": metadata,
+                "key": key,
+                "expiration": expiration
+            ]
+        )
+        
+        
+    }
+    
+    func renameSharedItem (uuid: String, receiverId: Int, metadata: String) async throws -> Void {
+        let response: BaseAPIResponse = try await self.apiRequestBaseAPI(
+            endpoint: "/v3/item/shared/rename",
+            method: .post,
+            body: RenameSharedItemBody(uuid: uuid, receiverId: receiverId, metadata: metadata)
+        )
+    }
+    
+    func renameItemInPublicLink (uuid: String, linkUUID: String, metadata: String) async throws -> Void {
+        let response: BaseAPIResponse = try await self.apiRequestBaseAPI(
+            endpoint: "/v3/item/linked/rename",
+            method: .post,
+            body: [
+                "uuid": uuid,
+                "linkUUID": linkUUID,
+                "metadata": metadata
+            ]
+        )
+        
+        
+    }
+    
+    func isSharingItem (uuid: String) async throws -> IsSharingItem {
+        let response: IsSharingItem = try await self.apiRequest(
+            endpoint: "/v3/item/shared",
+            method: .post,
+            body: [
+                "uuid": uuid
+            ]
+        )
+        
+        return response
+    }
+    
+    func isLinkingItem (uuid: String) async throws -> IsLinkingItem {
+        let response: IsLinkingItem = try await self.apiRequest(
+            endpoint: "/v3/item/linked",
+            method: .post,
+            body: [
+                "uuid": uuid
+            ]
+        )
+        
+        return response
+    }
+    
+    func getFolderContents (uuid: String, type: String = "normal", linkUUID: String?, linkHasPassword: Bool?, linkPassword: String?, linkSalt: String?) async throws -> GetFolderContents {
+        let response: GetFolderContents = try await self.apiRequest(
+            endpoint: type == "shared" ? "/v3/dir/download/shared" : type == "linked" ? "/v3/dir/download/link" : "/v3/dir/download",
+            method: .post,
+            body: type == "shared" ? [
+                "uuid": uuid
+            ] : type == "linked" ? [
+                "uuid": linkUUID!,
+                "parent": uuid,
+                "password": linkHasPassword! && linkSalt != nil && linkPassword != nil ? linkSalt!.count == 32 ? FilenCrypto.shared.deriveKeyFromPassword(password: linkPassword!, salt: linkSalt!, bitLength: 512, hash: .sha512, rounds: 200000) : FilenCrypto.shared.hashFn(message: linkPassword!.count == 0 ? "empty": linkPassword!) : FilenCrypto.shared.hashFn(message: "empty")
+            ] : [
+                "uuid": uuid
+            ]
+        )
+        
+        return response
+    }
+    
+    func checkIfItemIsSharedForRename (uuid: String, type: String, itemMetadata: CheckIfItemParentIsSharedMetadata) async throws -> Void {
+        guard let masterKeys = self.masterKeys() else {
+            throw FilenError("Not logged in")
+        }
+        
+        let isSharingItem = try await self.isSharingItem(uuid: uuid)
+        let isLinkingItem = try await self.isLinkingItem(uuid: uuid)
+        
+        if !isSharingItem.sharing && !isLinkingItem.link {
+            return
+        }
+        
+        if let metadata = type == "folder" ? String(data: try self.jsonEncoder.encode(FolderMetadata(name: itemMetadata.name!)), encoding: .utf8) : String(data: try self.jsonEncoder.encode(FileMetadata(name: itemMetadata.name!, size: itemMetadata.size!, mime: itemMetadata.mime!, key: itemMetadata.key!, lastModified: itemMetadata.lastModified!)), encoding: .utf8) {
+            if isSharingItem.sharing {
+                for user in isSharingItem.users! {
+                    if let encryptedMetadata = FilenCrypto.shared.encryptMetadataPublicKey(metadata: metadata, publicKey: user.publicKey) {
+                        try await self.renameSharedItem(
+                            uuid: uuid,
+                            receiverId: user.id,
+                            metadata: encryptedMetadata
+                        )
+                    }
+                }
+            }
+            
+            if isLinkingItem.link {
+                for link in isLinkingItem.links! {
+                    if let key = try FilenCrypto.shared.decryptFolderLinkKey(metadata: link.linkKey, masterKeys: masterKeys) {
+                        let encryptedMetadata = try FilenCrypto.shared.encryptMetadata(metadata: metadata, key: key)
+                        
+                        try await self.renameItemInPublicLink(
+                            uuid: uuid,
+                            linkUUID: link.linkUUID,
+                            metadata: encryptedMetadata
+                        )
+                    }
+                }
+            }
+        }
+    }
+    
+    func checkIfItemParentIsShared (type: String, parent: String, itemMetadata: CheckIfItemParentIsSharedMetadata) async throws -> Void {
+        guard let masterKeys = self.masterKeys() else {
+            throw FilenError("Not logged in")
+        }
+        
+        let isSharingParent = try await self.isSharingFolder(uuid: parent)
+        let isLinkingParent = try await self.isLinkingFolder(uuid: parent)
+        
+        if !isSharingParent.sharing && !isLinkingParent.link {
+            return
+        }
+        
+        if isSharingParent.sharing {
+            var filesToShare: [ItemToShareFile] = []
+            var foldersToShare: [ItemToShareFolder] = []
+            
+            if type == "file" {
+                filesToShare.append(
+                    ItemToShareFile(
+                        uuid: itemMetadata.uuid,
+                        parent: parent,
+                        metadata: FileMetadata(
+                            name: itemMetadata.name!,
+                            size: itemMetadata.size!,
+                            mime: itemMetadata.mime!,
+                            key: itemMetadata.key!,
+                            lastModified: itemMetadata.lastModified!
+                        )
+                    )
+                )
+            } else {
+                foldersToShare.append(
+                    ItemToShareFolder(
+                        uuid: itemMetadata.uuid,
+                        parent: parent,
+                        metadata: FolderMetadata(name: itemMetadata.name!)
+                    )
+                )
+                
+                let contents = try await self.getFolderContents(uuid: itemMetadata.uuid, type: "normal", linkUUID: nil, linkHasPassword: nil, linkPassword: nil, linkSalt: nil)
+                
+                for file in contents.files {
+                    if let decryptedMetadata = FilenCrypto.shared.decryptFileMetadata(metadata: file.metadata, masterKeys: masterKeys) {
+                        filesToShare.append(
+                            ItemToShareFile(
+                                uuid: file.uuid,
+                                parent: file.parent,
+                                metadata: decryptedMetadata
+                            )
+                        )
+                    }
+                }
+                
+                for i in 0..<contents.folders.count {
+                    let folder = contents.folders[i]
+                    
+                    if folder.uuid != itemMetadata.uuid && folder.parent != "base" {
+                        if let decryptedName = FilenCrypto.shared.decryptFolderName(metadata: folder.name, masterKeys: masterKeys) {
+                            foldersToShare.append(
+                                ItemToShareFolder(
+                                    uuid: folder.uuid,
+                                    parent: i == 0 ? "none" : folder.parent,
+                                    metadata: FolderMetadata(name: decryptedName)
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+            
+            for file in filesToShare {
+                if let metadata = String(data: try self.jsonEncoder.encode(file.metadata), encoding: .utf8) {
+                    for user in isSharingParent.users! {
+                        if let publicKeyEncryptedMetadata = FilenCrypto.shared.encryptMetadataPublicKey(metadata: metadata, publicKey: user.publicKey) {
+                            try await self.shareItem(
+                                uuid: file.uuid,
+                                parent: file.parent,
+                                email: user.email,
+                                type: "file",
+                                metadata: publicKeyEncryptedMetadata
+                            )
+                        }
+                    }
+                }
+            }
+            
+            for folder in foldersToShare {
+                if let metadata = String(data: try self.jsonEncoder.encode(folder.metadata), encoding: .utf8) {
+                    for user in isSharingParent.users! {
+                        if let publicKeyEncryptedMetadata = FilenCrypto.shared.encryptMetadataPublicKey(metadata: metadata, publicKey: user.publicKey) {
+                            try await self.shareItem(
+                                uuid: folder.uuid,
+                                parent: folder.parent,
+                                email: user.email,
+                                type: "folder",
+                                metadata: publicKeyEncryptedMetadata
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        
+        if isLinkingParent.link {
+            var filesToShare: [ItemToShareFile] = []
+            var foldersToShare: [ItemToShareFolder] = []
+            
+            if type == "file" {
+                filesToShare.append(
+                    ItemToShareFile(
+                        uuid: itemMetadata.uuid,
+                        parent: parent,
+                        metadata: FileMetadata(
+                            name: itemMetadata.name!,
+                            size: itemMetadata.size!,
+                            mime: itemMetadata.mime!,
+                            key: itemMetadata.key!,
+                            lastModified: itemMetadata.lastModified!
+                        )
+                    )
+                )
+            } else {
+                foldersToShare.append(
+                    ItemToShareFolder(
+                        uuid: itemMetadata.uuid,
+                        parent: parent,
+                        metadata: FolderMetadata(name: itemMetadata.name!)
+                    )
+                )
+                
+                let contents = try await self.getFolderContents(uuid: itemMetadata.uuid, type: "normal", linkUUID: nil, linkHasPassword: nil, linkPassword: nil, linkSalt: nil)
+                
+                for file in contents.files {
+                    if let decryptedMetadata = FilenCrypto.shared.decryptFileMetadata(metadata: file.metadata, masterKeys: masterKeys) {
+                        filesToShare.append(
+                            ItemToShareFile(
+                                uuid: file.uuid,
+                                parent: file.parent,
+                                metadata: decryptedMetadata
+                            )
+                        )
+                    }
+                }
+                
+                for i in 0..<contents.folders.count {
+                    let folder = contents.folders[i]
+                    
+                    if let decryptedName = FilenCrypto.shared.decryptFolderName(metadata: folder.name, masterKeys: masterKeys) {
+                        if folder.uuid != itemMetadata.uuid && folder.parent != "base" {
+                            foldersToShare.append(
+                                ItemToShareFolder(
+                                    uuid: folder.uuid,
+                                    parent: i == 0 ? "none" : folder.parent,
+                                    metadata: FolderMetadata(name: decryptedName)
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+            
+            for file in filesToShare {
+                if let metadata = String(data: try self.jsonEncoder.encode(file.metadata), encoding: .utf8) {
+                    for link in isLinkingParent.links! {
+                        if let key = try FilenCrypto.shared.decryptFolderLinkKey(metadata: link.linkKey, masterKeys: masterKeys) {
+                            let encryptedMetadata = try FilenCrypto.shared.encryptMetadata(metadata: metadata, key: key)
+                            
+                            try await self.addItemToPublicLink(
+                                uuid: file.uuid,
+                                parent: file.parent,
+                                linkUUID: link.linkUUID,
+                                type: "file",
+                                metadata: encryptedMetadata,
+                                key: link.linkKey,
+                                expiration: "never"
+                            )
+                        }
+                    }
+                }
+            }
+            
+            for folder in foldersToShare {
+                if let metadata = String(data: try self.jsonEncoder.encode(folder.metadata), encoding: .utf8) {
+                    for link in isLinkingParent.links! {
+                        if let key = try FilenCrypto.shared.decryptFolderLinkKey(metadata: link.linkKey, masterKeys: masterKeys) {
+                            let encryptedMetadata = try FilenCrypto.shared.encryptMetadata(metadata: metadata, key: key)
+                            
+                            try await self.addItemToPublicLink(
+                                uuid: folder.uuid,
+                                parent: folder.parent,
+                                linkUUID: link.linkUUID,
+                                type: "folder",
+                                metadata: encryptedMetadata,
+                                key: link.linkKey,
+                                expiration: "never"
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    func downloadAndDecryptChunk (uuid: String, region: String, bucket: String, index: Int, key: String, version: Int) async throws -> URL {
+        guard let downloadURL = URL(string: "\(egestUrls.randomElement()!)/\(region)/\(bucket)/\(uuid)/\(index)") else {
+            throw FilenError("Server unreachable")
+        }
+        
+        let tempFileURL = self.getTempPath().appendingPathComponent(UUID().uuidString.lowercased() + "." + uuid + "." + String(index), isDirectory: false)
+        let downloadedFileURL = try await sessionManager.download(downloadURL){ $0.timeoutInterval = 3600 }.validate().serializingDownloadedFileURL().value
+        
+        defer {
+            do {
+                if FileManager.default.fileExists(atPath: downloadedFileURL.path) {
+                    try FileManager.default.removeItem(at: downloadedFileURL)
+                }
+            } catch {
+                print(error)
+            }
+        }
+        
+        _ = try FilenCrypto.shared.streamDecryptData(input: downloadedFileURL, output: tempFileURL, key: key, version: version)
+        
+        return tempFileURL
+    }
+    
+    func downloadChunk (uuid: String, region: String, bucket: String, index: Int, key: String, version: Int) async throws -> (downloadedFileURL: URL, shouldTempFileURL: URL) {
+        guard let downloadURL = URL(string: "\(egestUrls.randomElement()!)/\(region)/\(bucket)/\(uuid)/\(index)") else {
+            throw FilenError("Server unreachable")
+        }
+        
+        let tempFileURL = self.getTempPath().appendingPathComponent(UUID().uuidString.lowercased() + "." + uuid + "." + String(index), isDirectory: false)
+        let downloadedFileURL = try await sessionManager.download(downloadURL){ $0.timeoutInterval = 3600 }.validate().serializingDownloadedFileURL().value
+        
+//        defer {
+//            do {
+//                if FileManager.default.fileExists(atPath: downloadedFileURL.path) {
+//                    try FileManager.default.removeItem(at: downloadedFileURL)
+//                }
+//            } catch {
+//                print(error)
+//            }
+//        }
+        
+        return (downloadedFileURL: downloadedFileURL, shouldTempFileURL: tempFileURL)
+    }
+    
+    func downloadFile (fileInfo: DirContentUpload, url: String) async throws -> (didDownload: Bool, url: String) {
+        let maxChunks = fileInfo.chunks
+        if (maxChunks <= 0) {
+            return (didDownload: false, url: "")
+        }
+        
+        guard let masterkeys = masterKeys() else {
+            throw FilenError("No master keys")
+        }
+        
+        guard let metadata = FilenCrypto.shared.decryptFileMetadata(metadata: fileInfo.metadata, masterKeys: masterkeys), let destinationURL = URL(string: url.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? url) else {
+            throw FilenError("No such item")
+        }
+        
+        let itemJSON = ItemJSON(uuid: fileInfo.uuid, parent: fileInfo.parent, name: metadata.name, type: "file", mime: metadata.mime ?? "", size: metadata.size ?? 0, timestamp: fileInfo.timestamp, lastModified: metadata.lastModified ?? 0, key: metadata.key, chunks: fileInfo.chunks, region: fileInfo.region, bucket: fileInfo.bucket, version: fileInfo.version)
+        
+        let destinationBaseURL = destinationURL.deletingLastPathComponent()
+        
+        print(destinationBaseURL.path)
+        print(url)
+        if !FileManager.default.fileExists(atPath: destinationBaseURL.path) {
+            try FileManager.default.createDirectory(at: destinationBaseURL, withIntermediateDirectories: true, attributes: nil)
+        }
+        
+        if FileManager.default.fileExists(atPath: url) {
+            return (didDownload: false, url: url)
+        }
+        
+        let tempFileURL = self.getTempPath().appendingPathComponent(UUID().uuidString.lowercased(), isDirectory: false)
+        
+        try await self.downloadSemaphore.acquire()
+        
+        defer {
+            do {
+                self.downloadSemaphore.release()
+                
+                if FileManager.default.fileExists(atPath: tempFileURL.path) {
+                    try FileManager.default.removeItem(at: tempFileURL)
+                }
+            } catch {
+                print(error)
+            }
+        }
+        
+        let chunksToDownload = maxChunks >= itemJSON.chunks ? itemJSON.chunks : maxChunks
+        
+        var status = 0
+        let dIo = DispatchIO(type: .random, path: tempFileURL.path, oflag: O_CREAT | O_WRONLY, mode: S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH, queue: DispatchQueue(label: "io.filenSDK"), cleanupHandler: { (err) in
+            status = Int(err)
+        })
+        if status != 0 {
+            return (didDownload: false, url: url)
+        }
+        
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            print(chunksToDownload)
+            for index in 0..<chunksToDownload {
+                autoreleasepool {
+                    group.addTask {
+                        try await self.transferSemaphore.acquire()
+                        
+                        let downloadedChunkInfo = try await self.downloadChunk(
+                            uuid: itemJSON.uuid,
+                            region: itemJSON.region,
+                            bucket: itemJSON.bucket,
+                            index: index,
+                            key: itemJSON.key,
+                            version: itemJSON.version
+                        )
+                        
+                        self.transferSemaphore.release()
+                        
+                        let decryptedChunkURL = downloadedChunkInfo.shouldTempFileURL
+                        _ = try FilenCrypto.shared.streamDecryptData(input: downloadedChunkInfo.downloadedFileURL, output: downloadedChunkInfo.shouldTempFileURL, key: itemJSON.key, version: itemJSON.version)
+                        if FileManager.default.fileExists(atPath: downloadedChunkInfo.downloadedFileURL.path) {
+                            try FileManager.default.removeItem(at: downloadedChunkInfo.downloadedFileURL)
+                        }
+                        
+                            defer {
+                                do {
+                                    if FileManager.default.fileExists(atPath: decryptedChunkURL.path) {
+                                        try FileManager.default.removeItem(at: decryptedChunkURL)
+                                    }
+                                } catch {
+                                    print(error)
+                                }
+                            }
+                            
+                            guard let readStream = InputStream(fileAtPath: decryptedChunkURL.path) else {
+                                throw NSError(domain: "Could not open read stream", code: 1, userInfo: nil)
+                            }
+                            defer {
+                                readStream.close()
+                            }
+                            readStream.open()
+                            
+                            let bufferSize = 1024
+                            var buffer = [UInt8](repeating: 0, count: bufferSize)
+                            var tmpOffset: Int64 = 0
+                            
+                            while readStream.hasBytesAvailable {
+                                autoreleasepool {
+                                    let bytesRead:Int64 = Int64(readStream.read(&buffer, maxLength: bufferSize))
+                                    
+                                    if bytesRead > 0 {
+                                        let data1 = Data(buffer)
+                                        data1.withUnsafeBytes {
+                                            dIo?.write(offset: 1024 * 1024 * Int64(index) + tmpOffset, data: DispatchData(bytes: UnsafeRawBufferPointer(start: $0, count: data1.count)), queue: DispatchQueue(label: "io.filenSDK"), ioHandler: { (done, data, err) in
+                                                if (done){
+                                                    //                                            print("Finished with \(1024 * 1024 * Int64(index) + tmpOffset)")
+                                                } else if (err != 0) {
+                                                    print("ERROR \(err) at \(1024 * 1024 * Int64(index) + tmpOffset)")
+                                                }
+                                            })
+                                            tmpOffset += bytesRead
+                                        }
+//                                    }
+                                }
+                            }
+                        }
+                        
+                        
+//                        try await waitForWriteSlot(index: index)
+//                        
+//                        if index == 0 {
+//                            try FileManager.default.moveItem(atPath: decryptedChunkURL.path, toPath: tempFileURL.path)
+//                        } else {
+//                            try FilenUtils.shared.appendFile(from: decryptedChunkURL, to: tempFileURL)
+//                        }
+//                        
+//                        await currentWriteIndex.increase()
+                    }
+                }
+                
+            }
+            for try await _ in group {}
+        }
+        
+        dIo?.close()
+        /*for index in 0..<chunksToDownload  {
+         try await self.downloadAndDecryptChunk(
+         destinationURL: tempFileURL,
+         uuid: uuid,
+         region: itemJSON.region,
+         bucket: itemJSON.bucket,
+         index: index,
+         key: itemJSON.key,
+         version: itemJSON.version
+         )
+         }*/
+        
+        if !FileManager.default.fileExists(atPath: tempFileURL.path) {
+            throw FilenError("Server unreachable")
+        }
+        
+        try FileManager.default.moveItem(atPath: tempFileURL.path, toPath: destinationURL.path)
+        
+        return (didDownload: true, url: url)
+    }
+}
+
+//extension BodyStringEncoding {
+//  enum Errors: Error {
+//    case emptyURLRequest
+//    case encodingProblem
+//  }
+//}
+//
+//extension BodyStringEncoding.Errors: LocalizedError {
+//  var errorDescription: String? {
+//    switch self {
+//      case .emptyURLRequest: return "Empty url request"
+//      case .encodingProblem: return "Encoding problem"
+//    }
+//  }
+//}
+
+actor DownloadFileCurrentWriteIndex {
+    var index = 0
+    
+    func increase() -> Void {
+        index += 1
+    }
+}
+
+actor UploadFileResult {
+    var bucket = ""
+    var region = ""
+    
+    func set(bucket b: String, region r: String) -> Void {
+        bucket = b
+        region = r
+    }
+}
