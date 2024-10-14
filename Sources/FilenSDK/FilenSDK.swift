@@ -33,7 +33,7 @@ public class FilenClient {
         return internalSessionManager
     }
     
-    var config: SDKConfiguration?
+    public var config: SDKConfiguration?
     private let tempPath: URL
     
     internal let jsonDecoder = IkigaJSONDecoder()
@@ -57,7 +57,7 @@ public class FilenClient {
         return tempPath
     }
     
-    init(tempPath: URL, from config: SDKConfiguration? = nil) {
+    public init(tempPath: URL, from config: SDKConfiguration? = nil) {
         self.config = config
         self.tempPath = tempPath
     }
@@ -130,7 +130,7 @@ final class FilenError : Error {
  }
 
  */
-struct SDKConfiguration : Decodable {
+public struct SDKConfiguration : Decodable {
     let email: String
     let password: String
     let masterKeys: [String]
