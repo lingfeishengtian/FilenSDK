@@ -39,6 +39,6 @@ struct UserInfoResponse : Decodable {
      uuid: string;
  };
  */
-struct UserBaseFolderResponse : Decodable {
-    let uuid: String
+public struct UserBaseFolderResponse : Decodable, Sendable {
+    public let uuid: String
 }

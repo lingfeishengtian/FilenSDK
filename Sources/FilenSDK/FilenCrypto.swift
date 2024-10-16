@@ -136,6 +136,7 @@ final class FilenCrypto : Sendable {
                         return obj.name
                     }
                 } catch {
+                    print(error)
                     continue
                 }
             }

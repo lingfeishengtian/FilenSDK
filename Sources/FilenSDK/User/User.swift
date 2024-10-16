@@ -15,7 +15,7 @@ extension FilenClient {
         return try await apiRequest(endpoint: "/v3/user/info", method: .get, body: nil, apiKey: apiKey)
     }
     
-    func baseFolder() async throws -> UserBaseFolderResponse {
+    public func baseFolder() async throws -> UserBaseFolderResponse {
         guard let apiKey = config?.apiKey else {
             throw FilenError("Not logged in")
         }

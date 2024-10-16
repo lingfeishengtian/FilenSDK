@@ -41,3 +41,18 @@ func login() async throws {
 //    try folderContents.files.debugDescription.write(toFile: FileManager.default.temporaryDirectory.appending(path: "test.txt").absoluteString, atomically: true, encoding: .utf8)
 //    print(FileManager.default.temporaryDirectory.appending(path: "test.txt").absoluteString)
 }
+
+
+@Test("foldername") func testDecryptFoldername() async throws {
+    guard let url = Bundle.module.url(forResource: "config", withExtension: "json") else {
+        throw FilenError("Missing file: config.json")
+    }
+    
+    let serialized = try JSONDecoder().decode(SDKConfiguration.self, from: try Data(contentsOf: url))
+    let client = FilenClient(tempPath: FileManager.default.temporaryDirectory, from: serialized)
+    do {
+        print(try client.decryptFolderName(name: "002OZhg8l0Lk0BFCz3RwkxY6BIWTVs5JkzCKR72NjAVIv+esx8f9MfOA+DZNfe8"))
+    } catch {
+        print(error)
+    }
+}

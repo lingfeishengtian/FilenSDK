@@ -9,9 +9,41 @@ import Foundation
 import Alamofire
 import UniformTypeIdentifiers
 
-@available(macCatalyst 14.0, *)
 extension FilenClient: @unchecked Sendable
 {
+    public func createFolder (name: String, parent: String) async throws -> String {
+      guard let masterKeys = self.masterKeys() else {
+          throw FilenError("Maaster kesy are not set.")
+      }
+      
+      let encryptedName = try FilenCrypto.shared.encryptFolderName(name: FolderMetadata(name: name), masterKeys: masterKeys)
+      let nameHashed = try FilenCrypto.shared.hashFn(message: name.lowercased())
+      
+      let uuid = UUID().uuidString.lowercased()
+      
+      let response: CreateFolder = try await self.apiRequest(
+        endpoint: "/v3/dir/create",
+        method: .post,
+        body: [
+          "uuid": uuid,
+          "name": encryptedName,
+          "nameHashed": nameHashed,
+          "parent": parent
+        ]
+      )
+      
+        try await checkIfItemParentIsShared(
+          type: "folder",
+          parent: parent,
+          itemMetadata: CheckIfItemParentIsSharedMetadata(
+            uuid: uuid,
+            name: name
+          )
+        )
+        
+        return response.uuid
+    }
+    
     func uploadChunk (url: URL, fileURL: URL, checksum: String) async throws -> (region: String, bucket: String) {
         guard let apiKey = config?.apiKey else {
             throw FilenError("API key is not set.")
@@ -23,7 +55,11 @@ extension FilenClient: @unchecked Sendable
             "Checksum": checksum
         ]
         
-        let response = try await sessionManager.upload(fileURL, to: url, headers: headers){ $0.timeoutInterval = 3600 }.validate().serializingDecodable(UploadChunk.self).value
+        let r = try await sessionManager.upload(fileURL, to: url, headers: headers){ $0.timeoutInterval = 3600 }.validate()
+        print(try await r.serializingString().value)
+        guard let response = try await r.serializingDecodable(FilenResponse<UploadChunk>.self).value.data else {
+            throw FilenError("Failed serialize")
+        }
         
         return (region: response.region, bucket: response.bucket)
     }
@@ -69,7 +105,7 @@ extension FilenClient: @unchecked Sendable
         }
     }
     
-    func uploadFile (url: String, parent: String) async throws -> ItemJSON {
+    public func uploadFile (url: String, parent: String) async throws -> ItemJSON {
         if (!FileManager.default.fileExists(atPath: url)) {
             throw FilenError("No such file")
         }
@@ -137,11 +173,11 @@ extension FilenClient: @unchecked Sendable
         try await withThrowingTaskGroup(of: Void.self) { group in
             for index in 0..<fileChunks {
                 autoreleasepool {
-                    group.addTask { [transferSemaphore = self.transferSemaphore] in
-                        try await transferSemaphore.acquire()
+                    group.addTask { @Sendable in
+                        try await self.transferSemaphore.acquire()
 
                         defer {
-                            transferSemaphore.release()
+                            self.transferSemaphore.release()
                         }
                         
                         let result = try await self.encryptAndUploadChunk(url: url, chunkSize: chunkSizeToUse, uuid: uuid, index: index, uploadKey: uploadKey, parent: parent, key: key)
@@ -657,7 +693,7 @@ extension FilenClient: @unchecked Sendable
         return (downloadedFileURL: downloadedFileURL, shouldTempFileURL: tempFileURL)
     }
     
-    func downloadFile (fileInfo: DirContentUpload, url: String) async throws -> (didDownload: Bool, url: String) {
+    public func downloadFile (fileInfo: DirContentUpload, url: String) async throws -> (didDownload: Bool, url: String) {
         let maxChunks = fileInfo.chunks
         if (maxChunks <= 0) {
             return (didDownload: false, url: "")
@@ -715,7 +751,7 @@ extension FilenClient: @unchecked Sendable
             print(chunksToDownload)
             for index in 0..<chunksToDownload {
                 autoreleasepool {
-                    group.addTask {
+                    group.addTask { @Sendable in
                         try await self.transferSemaphore.acquire()
                         
                         let downloadedChunkInfo = try await self.downloadChunk(

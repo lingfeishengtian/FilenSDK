@@ -4,7 +4,7 @@
 //  Created by Jan Lenczyk on 02.10.23.
 //
 
-struct FetchFolderContentsFile: Decodable {
+struct FetchFolderContentsFile: Decodable, Sendable {
   var uuid: String
   var metadata: String
   var rm: String
@@ -18,7 +18,7 @@ struct FetchFolderContentsFile: Decodable {
   var favorited: Int
 }
 
-struct FetchFolderContentsFolder: Decodable {
+struct FetchFolderContentsFolder: Decodable, Sendable {
   var uuid: String
   var name: String
   var parent: String
@@ -29,7 +29,7 @@ struct FetchFolderContentsFolder: Decodable {
   var is_default: Int?
 }
 
-struct FetchFolderContents: Decodable {
+struct FetchFolderContents: Decodable, Sendable {
   var uploads: [FetchFolderContentsFile]
   var folders: [FetchFolderContentsFolder]
 }
@@ -64,20 +64,20 @@ struct Item {
   var version: Int
 }
 
-struct ItemJSON: Codable {
-  var uuid: String
-  var parent: String
-  var name: String
-  var type: String
-  var mime: String
-  var size: Int
-  var timestamp: Int
-  var lastModified: Int
-  var key: String
-  var chunks: Int
-  var region: String
-  var bucket: String
-  var version: Int
+public struct ItemJSON: Codable, Sendable {
+    public var uuid: String
+    public var parent: String
+    public var name: String
+    public var type: String
+    public var mime: String
+    public var size: Int
+    public var timestamp: Int
+    public var lastModified: Int
+    public var key: String
+    public var chunks: Int
+    public var region: String
+    public var bucket: String
+    public var version: Int
 }
 
 struct UploadChunk: Decodable {

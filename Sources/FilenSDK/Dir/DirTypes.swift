@@ -7,32 +7,32 @@
 
 import Foundation
 
-struct DirContentUpload: Codable {
-    var uuid: String
-    var metadata: String
-    var rm: String
-    var timestamp: Int
-    var chunks: Int
-    var size: Int
-    var bucket: String
-    var region: String
-    var parent: String
-    var version: Int
-    var favorited: Int
+public struct DirContentUpload: Codable, Sendable {
+    public var uuid: String
+    public var metadata: String
+    public var rm: String
+    public var timestamp: Int
+    public var chunks: Int
+    public var size: Int
+    public var bucket: String
+    public var region: String
+    public var parent: String
+    public var version: Int
+    public var favorited: Int
 }
 
-struct DirContentFolder: Codable {
-    var uuid: String
-    var name: String
-    var parent: String
-    var color: String?
-    var timestamp: Int
-    var favorited: Int
-    var is_sync: Int
-    var is_default: Int
+public struct DirContentFolder: Codable, Sendable {
+    public var uuid: String
+    public var name: String
+    public var parent: String
+    public var color: String?
+    public var timestamp: Int
+    public var favorited: Int
+    public var is_sync: Int
+    public var is_default: Int
 }
 
-struct DirContentResponse: Codable {
-    var uploads: [DirContentUpload]
-    var folders: [DirContentFolder]
+public struct DirContentResponse: Codable, Sendable {
+    public var uploads: [DirContentUpload]
+    public var folders: [DirContentFolder]
 }

@@ -43,7 +43,7 @@ struct LoginResponse : Decodable {
     let privateKey: String
 }
 
-struct FilenResponse<T: Decodable> : Decodable {
+struct FilenResponse<T: Decodable & Sendable> : Decodable {
     let status: Bool
     let message: String
     let code: String

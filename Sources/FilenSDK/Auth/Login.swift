@@ -14,7 +14,7 @@ extension FilenClient {
         ])
     }
     
-    func login(email: String, password: String, twoFactorCode: String = "XXXXXX") async throws {
+    public func login(email: String, password: String, twoFactorCode: String = "XXXXXX") async throws {
         let authInfo = try await getAuthInfo(email: email)
         let authVersion = authInfo.authVersion
         let derivedInfo = try FilenCrypto.shared.generatePasswordAndMasterKeysBasedOnAuthVersion(authVersion: authVersion.rawValue, rawPassword: password, salt: authInfo.salt)

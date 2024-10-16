@@ -65,8 +65,9 @@ public class FilenClient {
     func masterKeys () -> [String]? {
         return config?.masterKeys
     }
-        
-    func apiRequestBaseAPI <T: Decodable>(endpoint: String, method: HTTPMethod, body: Encodable?, apiKey: String? = nil) async throws -> T {
+    
+    typealias Encodasenable = Encodable & Sendable
+    func apiRequestBaseAPI <T: Decodable & Sendable>(endpoint: String, method: HTTPMethod, body: Encodasenable?, apiKey: String? = nil) async throws -> T {
 //        let url = URL(string: "https://api.filen.io/")!.appendingPathComponent(endpoint)
         var url = URLComponents(string: "https://gateway.filen.io")
         url?.path = endpoint
@@ -99,20 +100,42 @@ public class FilenClient {
         return try await resp.serializingDecodable(T.self).value
     }
     
-    func apiRequest <T: Decodable>(endpoint: String, method: HTTPMethod, body: Encodable?, apiKey: String? = nil) async throws -> T {
+    func apiRequest <T: Decodable & Sendable>(endpoint: String, method: HTTPMethod, body: Encodasenable?, apiKey: String? = nil) async throws -> T {
         let ret: FilenResponse<T> = try await apiRequestBaseAPI(endpoint: endpoint, method: method, body: body, apiKey: apiKey)
         guard let data = ret.data else {
-            throw FilenError(ret.code)
+            throw FilenError(ret.message)
         }
         return data
     }
+    
+    public func decryptFolderName(name: String) throws -> String {
+        guard let masterKeys = config?.masterKeys else {
+            throw FilenError("Not logged in")
+        }
+        print("Attempting \(name) decyrpt with \(masterKeys)")
+        return FilenCrypto.shared.decryptFolderName(metadata: name, masterKeys: masterKeys) ?? name
+    }
+    
+    public func decryptFileName(metadata: String) throws -> String {
+        guard let masterKeys = config?.masterKeys else {
+            throw FilenError("Not logged in")
+        }
+        print("Attempting \(metadata) decyrpt with \(masterKeys)")
+        return FilenCrypto.shared.decryptFileMetadata(metadata: metadata, masterKeys: masterKeys)?.name ?? metadata
+    }
 }
 
-final class FilenError : Error {
+public final class FilenError : LocalizedError {
     let description: String
     
     init(_ description: String) {
         self.description = description
+    }
+    
+    public var errorDescription: String? {
+        get {
+            return self.description
+        }
     }
 }
 
