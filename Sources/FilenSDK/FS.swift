@@ -693,6 +693,11 @@ extension FilenClient: @unchecked Sendable
         return (downloadedFileURL: downloadedFileURL, shouldTempFileURL: tempFileURL)
     }
     
+    public func downloadFile(fileGetResponse: FileGetResponse, url: String) async throws -> (didDownload: Bool, url: String) {
+        let fileInfo = DirContentUpload(uuid: fileGetResponse.uuid, metadata: fileGetResponse.metadata, rm: "file", timestamp: 0, chunks: Int(ceil(Double(fileGetResponse.size) / 1024.0 / 1024.0)), size: fileGetResponse.size, bucket: fileGetResponse.bucket, region: fileGetResponse.region, parent: fileGetResponse.parent, version: fileGetResponse.version, favorited: 0)
+        return try await downloadFile(fileInfo: fileInfo, url: url)
+    }
+    
     public func downloadFile (fileInfo: DirContentUpload, url: String) async throws -> (didDownload: Bool, url: String) {
         let maxChunks = fileInfo.chunks
         if (maxChunks <= 0) {
@@ -747,12 +752,13 @@ extension FilenClient: @unchecked Sendable
             return (didDownload: false, url: url)
         }
         
+                
         try await withThrowingTaskGroup(of: Void.self) { group in
             print(chunksToDownload)
             for index in 0..<chunksToDownload {
                 autoreleasepool {
                     group.addTask { @Sendable in
-                        try await self.transferSemaphore.acquire()
+                        try await self.downloadSemaphore.acquire()
                         
                         let downloadedChunkInfo = try await self.downloadChunk(
                             uuid: itemJSON.uuid,
@@ -763,7 +769,7 @@ extension FilenClient: @unchecked Sendable
                             version: itemJSON.version
                         )
                         
-                        self.transferSemaphore.release()
+                        self.downloadSemaphore.release()
                         
                         let decryptedChunkURL = downloadedChunkInfo.shouldTempFileURL
                         _ = try FilenCrypto.shared.streamDecryptData(input: downloadedChunkInfo.downloadedFileURL, output: downloadedChunkInfo.shouldTempFileURL, key: itemJSON.key, version: itemJSON.version)
@@ -793,25 +799,31 @@ extension FilenClient: @unchecked Sendable
                             var buffer = [UInt8](repeating: 0, count: bufferSize)
                             var tmpOffset: Int64 = 0
                             
+                        autoreleasepool {
+                            let dispatch = DispatchGroup()
                             while readStream.hasBytesAvailable {
-                                autoreleasepool {
-                                    let bytesRead:Int64 = Int64(readStream.read(&buffer, maxLength: bufferSize))
+                                let bytesRead:Int64 = Int64(readStream.read(&buffer, maxLength: bufferSize))
+                                
+                                if bytesRead > 0 {
+                                    let data1 = Data(buffer)
                                     
-                                    if bytesRead > 0 {
-                                        let data1 = Data(buffer)
-                                        data1.withUnsafeBytes {
-                                            dIo?.write(offset: 1024 * 1024 * Int64(index) + tmpOffset, data: DispatchData(bytes: UnsafeRawBufferPointer(start: $0, count: data1.count)), queue: DispatchQueue(label: "io.filenSDK"), ioHandler: { (done, data, err) in
-                                                if (done){
-                                                    //                                            print("Finished with \(1024 * 1024 * Int64(index) + tmpOffset)")
-                                                } else if (err != 0) {
-                                                    print("ERROR \(err) at \(1024 * 1024 * Int64(index) + tmpOffset)")
-                                                }
-                                            })
-                                            tmpOffset += bytesRead
-                                        }
-//                                    }
+                                    data1.withUnsafeBytes {
+                                        dispatch.enter()
+                                        dIo?.write(offset: 1024 * 1024 * Int64(index) + tmpOffset, data: DispatchData(bytes: UnsafeRawBufferPointer(start: $0, count: Int(bytesRead))), queue: DispatchQueue(label: "io.filenSDK"), ioHandler: { (done, data, err) in
+                                            if (done){
+                                                //                                            print("Finished with \(1024 * 1024 * Int64(index) + tmpOffset)")
+                                            } else if (err != 0) {
+                                                print("ERROR \(err) at \(1024 * 1024 * Int64(index) + tmpOffset)")
+                                            }
+
+                                            dispatch.leave()
+                                        })
+                                        tmpOffset += bytesRead
+                                    }
+                                    //                                    }
                                 }
                             }
+                            dispatch.wait()
                         }
                         
                         

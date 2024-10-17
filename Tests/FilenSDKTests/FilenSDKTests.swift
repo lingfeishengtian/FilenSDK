@@ -32,10 +32,15 @@ func login() async throws {
     print(FileManager.default.temporaryDirectory)
     print(client.config)
     
-    let folderContents = try await client.dirContent(uuid: client.config!.baseFolderUUID!)
-    print(folderContents)
-    let res = try await client.downloadFile(fileInfo: folderContents.uploads[1], url: URL(filePath: "~/Downloads/test.txt", directoryHint: .notDirectory)!.path)
-    print(res)
+    let folderContents = try await client.dirContent(uuid: "65fba3ce-e153-4802-87d4-5100c7e4fcd1")
+    for f in folderContents.uploads {
+        if f.uuid == "37e56a06-f3f4-44af-8a12-dfa7c40a17d4" {
+            let res = try await client.downloadFile(fileInfo: f, url: URL(filePath: "/Users/hunterhan/Downloads/testtets.PNG", directoryHint: .notDirectory)!.path)
+        }
+    }
+//    print(folderContents)
+//    let res = try await client.downloadFile(fileInfo: folderContents.uploads[1], url: URL(filePath: "~/Downloads/test.txt", directoryHint: .notDirectory)!.path)
+//    print(res)
 //    print(folderContents.folders.count)
 //    print(folderContents.files.count)
 //    try folderContents.files.debugDescription.write(toFile: FileManager.default.temporaryDirectory.appending(path: "test.txt").absoluteString, atomically: true, encoding: .utf8)
