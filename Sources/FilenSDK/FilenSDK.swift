@@ -5,34 +5,36 @@ import Foundation
 import Alamofire
 import IkigaJSON
 
+
+internal let sessionConfiguration: URLSessionConfiguration = {
+    let configuration = URLSessionConfiguration.af.default
+    
+    configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+    configuration.urlCache = nil
+    configuration.urlCredentialStorage = nil
+    configuration.urlCache = URLCache(memoryCapacity: 0, diskCapacity: 0, diskPath: nil)
+    
+    return configuration
+}()
+
+internal let internalSessionManager: Alamofire.Session = {
+    return Alamofire.Session(
+        configuration: sessionConfiguration,
+        rootQueue: DispatchQueue(label: "org.alamofire.sessionManager.rootQueue"),
+        startRequestsImmediately: true,
+        interceptor: nil,
+        serverTrustManager: nil,
+        redirectHandler: nil,
+        cachedResponseHandler: nil
+    )
+}()
+
+public var sessionManager: Alamofire.Session {
+    return internalSessionManager
+}
+
+
 public class FilenClient {
-    internal lazy var sessionConfiguration: URLSessionConfiguration = {
-        let configuration = URLSessionConfiguration.af.default
-        
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.urlCache = nil
-        configuration.urlCredentialStorage = nil
-        configuration.urlCache = URLCache(memoryCapacity: 0, diskCapacity: 0, diskPath: nil)
-        
-        return configuration
-    }()
-    
-    internal lazy var internalSessionManager: Alamofire.Session = {
-        return Alamofire.Session(
-            configuration: sessionConfiguration,
-            rootQueue: DispatchQueue(label: "org.alamofire.sessionManager.rootQueue"),
-            startRequestsImmediately: true,
-            interceptor: nil,
-            serverTrustManager: nil,
-            redirectHandler: nil,
-            cachedResponseHandler: nil
-        )
-    }()
-    
-    public var sessionManager: Alamofire.Session {
-        return internalSessionManager
-    }
-    
     public var config: SDKConfiguration?
     private let tempPath: URL
     
@@ -51,6 +53,17 @@ public class FilenClient {
         "https://egest.filen-4.net",
         "https://egest.filen-5.net",
         "https://egest.filen-6.net"
+    ]
+    
+    final let igestUrls = [
+        "https://ingest.filen.io",
+        "https://ingest.filen.net",
+        "https://ingest.filen-1.net",
+        "https://ingest.filen-2.net",
+        "https://ingest.filen-3.net",
+        "https://ingest.filen-4.net",
+        "https://ingest.filen-5.net",
+        "https://ingest.filen-6.net"
     ]
     
     func getTempPath () -> URL {

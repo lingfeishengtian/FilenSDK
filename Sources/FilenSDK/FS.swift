@@ -79,7 +79,7 @@ extension FilenClient: @unchecked Sendable
         
         let queryItemsChecksum = try FilenCrypto.shared.hash(message: queryItemsJSONString, hash: .sha512)
         
-        guard let urlWithComponents = URL(string: "https://ingest.filen.io/v3/upload?uuid=\(uuid.lowercased())&index=\(index)&uploadKey=\(uploadKey)&parent=\(parent.lowercased())&hash=\(chunkChecksum)") else {
+        guard let urlWithComponents = URL(string: "\(igestUrls.randomElement()!)/v3/upload?uuid=\(uuid.lowercased())&index=\(index)&uploadKey=\(uploadKey)&parent=\(parent.lowercased())&hash=\(chunkChecksum)") else {
             throw NSError(domain: "encryptAndUploadChunk", code: 2, userInfo: nil)
         }
         
@@ -758,7 +758,7 @@ extension FilenClient: @unchecked Sendable
             for index in 0..<chunksToDownload {
                 autoreleasepool {
                     group.addTask { @Sendable in
-                        try await self.downloadSemaphore.acquire()
+                        try await self.transferSemaphore.acquire()
                         
                         let downloadedChunkInfo = try await self.downloadChunk(
                             uuid: itemJSON.uuid,
@@ -769,7 +769,7 @@ extension FilenClient: @unchecked Sendable
                             version: itemJSON.version
                         )
                         
-                        self.downloadSemaphore.release()
+                        self.transferSemaphore.release()
                         
                         let decryptedChunkURL = downloadedChunkInfo.shouldTempFileURL
                         _ = try FilenCrypto.shared.streamDecryptData(input: downloadedChunkInfo.downloadedFileURL, output: downloadedChunkInfo.shouldTempFileURL, key: itemJSON.key, version: itemJSON.version)

@@ -257,6 +257,7 @@ class Semaphore : @unchecked Sendable {
               
                 continuation.resume(returning: true)
               } else {
+                  print("Semaphore \(self.counter) is full.")
                 self.waiting.append(continuation)
               }
           }
