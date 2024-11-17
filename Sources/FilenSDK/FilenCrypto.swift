@@ -10,7 +10,6 @@ import CommonCrypto
 import Security
 import OpenSSL
 import IkigaJSON
-import SwiftyRSA
 
 final class FilenCrypto : Sendable {
     public static let shared: FilenCrypto = {
@@ -1185,28 +1184,41 @@ final class FilenCrypto : Sendable {
         }
     }
     
+    
     func importPublicKeyFromBase64DER(base64Key: String) -> SecKey? {
-        autoreleasepool {
-            do {
-                return try PublicKey(base64Encoded: base64Key).reference
-            } catch {
-                print("[importPublicKeyFromBase64DER] error: \(error)")
-                
-                return nil
-            }
+        guard let derData = Data(base64Encoded: base64Key) else { return nil }
+        
+        let keyAttributes: [CFString: Any] = [
+            kSecAttrKeyType: kSecAttrKeyTypeRSA,
+            kSecAttrKeyClass: kSecAttrKeyClassPublic,
+            kSecAttrKeySizeInBits: 4096
+        ]
+        
+        var error: Unmanaged<CFError>?
+        
+        if let publicKey = SecKeyCreateWithData(derData as CFData, keyAttributes as CFDictionary, &error) {
+            return publicKey
         }
+        
+        return nil
     }
     
     func importPrivateKeyFromBase64DER(base64Key: String) -> SecKey? {
-        autoreleasepool {
-            do {
-                return try PrivateKey(base64Encoded: base64Key).reference
-            } catch {
-                print("[importPrivateKeyFromBase64DER] error: \(error)")
-                
-                return nil
-            }
+        guard let derData = Data(base64Encoded: base64Key) else { return nil }
+        
+        let keyAttributes: [CFString: Any] = [
+            kSecAttrKeyType: kSecAttrKeyTypeRSA,
+            kSecAttrKeyClass: kSecAttrKeyClassPrivate,
+            kSecAttrKeySizeInBits: 4096
+        ]
+        
+        var error: Unmanaged<CFError>?
+        
+        if let publicKey = SecKeyCreateWithData(derData as CFData, keyAttributes as CFDictionary, &error) {
+            return publicKey
         }
+        
+        return nil
     }
     
     func removePKCS7Padding(from bytes: [UInt8]) -> [UInt8] {

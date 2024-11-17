@@ -26,7 +26,7 @@ let package = Package(
         // Targets can depend on other targets in this package and products from dependencies.
         .target(
             name: "FilenSDK",
-            dependencies: ["Alamofire", "OpenSSL", "IkigaJSON", "SwiftyRSA"]),
+            dependencies: ["Alamofire", "OpenSSL", "IkigaJSON"]),
         .testTarget(
             name: "FilenSDKTests",
             dependencies: ["FilenSDK"],
