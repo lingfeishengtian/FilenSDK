@@ -174,8 +174,8 @@ public struct SDKConfiguration : Decodable {
     var publicKey: String? = nil
     var privateKey: String? = nil
     let authVersion: Int
-    var baseFolderUUID: String? = nil
-    var userId: Int? = nil
+    public var baseFolderUUID: String? = nil
+    public var userId: Int? = nil
     
     public init(masterKeys: [String], apiKey: String, publicKey: String, privateKey: String, authVersion: Int, baseFolderUUID: String, userId: Int) {
 //        self.email = email
