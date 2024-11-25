@@ -174,6 +174,16 @@ public struct SDKConfiguration : Decodable {
     let authVersion: Int
     public var baseFolderUUID: String? = nil
     public var userId: Int? = nil
+    
+    public init(masterKeys: [String], apiKey: String, publicKey: String? = nil, privateKey: String? = nil, authVersion: Int, baseFolderUUID: String? = nil, userId: Int? = nil) {
+        self.masterKeys = masterKeys
+        self.apiKey = apiKey
+        self.publicKey = publicKey
+        self.privateKey = privateKey
+        self.authVersion = authVersion
+        self.baseFolderUUID = baseFolderUUID
+        self.userId = userId
+    }
 }
 
 public extension SDKConfiguration {
