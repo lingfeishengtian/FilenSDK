@@ -78,6 +78,22 @@ public struct ItemJSON: Codable, Sendable {
     public var region: String
     public var bucket: String
     public var version: Int
+    
+    public init(uuid: String, parent: String, name: String, type: String, mime: String, size: Int, timestamp: Int, lastModified: Int, key: String, chunks: Int, region: String, bucket: String, version: Int) {
+        self.uuid = uuid
+        self.parent = parent
+        self.name = name
+        self.type = type
+        self.mime = mime
+        self.size = size
+        self.timestamp = timestamp
+        self.lastModified = lastModified
+        self.key = key
+        self.chunks = chunks
+        self.region = region
+        self.bucket = bucket
+        self.version = version
+    }
 }
 
 struct UploadChunk: Decodable {
