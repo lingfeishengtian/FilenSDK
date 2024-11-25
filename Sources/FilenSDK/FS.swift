@@ -109,7 +109,7 @@ extension FilenClient: @unchecked Sendable
         }
     }
     
-    public func uploadFile (url: String, parent: String) async throws -> ItemJSON {
+    public func uploadFile (url: String, parent: String, with name: String? = nil, progress: Progress = Progress()) async throws -> ItemJSON {
         if (!FileManager.default.fileExists(atPath: url)) {
             throw FilenError.noSuchFile
         }
@@ -138,7 +138,7 @@ extension FilenClient: @unchecked Sendable
         }
         
         let uuid = UUID().uuidString.lowercased()
-        let fileName = fileURL.lastPathComponent
+        let fileName = name ?? fileURL.lastPathComponent
         var dummyOffset = 0
         var fileChunks = 0
         let chunkSizeToUse = 1024 * 1024
@@ -176,6 +176,7 @@ extension FilenClient: @unchecked Sendable
         
         let maxUploadTasks = 50
         
+        progress.totalUnitCount = Int64(fileChunks)
         try await withThrowingTaskGroup(of: Void.self) { group in
             for index in 0..<fileChunks {
                 if index >= maxUploadTasks {
@@ -188,6 +189,8 @@ extension FilenClient: @unchecked Sendable
                     if (result.bucket.count > 0 && result.region.count > 0) {
                         await uploadFileResult.set(bucket: result.bucket, region: result.region)
                     }
+                    
+                    progress.completedUnitCount += 1
                 }
             }
             
@@ -196,23 +199,6 @@ extension FilenClient: @unchecked Sendable
         
         let bucket = await uploadFileResult.bucket
         let region = await uploadFileResult.region
-        
-        /*for index in 0..<fileChunks {
-         let result = try await self.encryptAndUploadChunk(
-         url: url,
-         chunkSize: chunkSizeToUse,
-         uuid: uuid,
-         index: index,
-         uploadKey: uploadKey,
-         parent: parent,
-         key: key
-         )
-         
-         if (result.bucket.count > 0 && result.region.count > 0) {
-         bucket = result.bucket
-         region = result.region
-         }
-         }*/
         
         let done = try await self.markUploadAsDone(
             uuid: uuid,
@@ -662,21 +648,28 @@ extension FilenClient: @unchecked Sendable
     }
     
     public func downloadFile (fileInfo: DirContentUpload, url: String) async throws -> (didDownload: Bool, url: String) {
-        let maxChunks = fileInfo.chunks
-        if (maxChunks <= 0) {
-            return (didDownload: false, url: "")
-        }
-        
         guard let masterkeys = masterKeys() else {
             throw FilenError.masterKeyMissing
         }
         
-        guard let metadata = FilenCrypto.shared.decryptFileMetadata(metadata: fileInfo.metadata, masterKeys: masterkeys), let destinationURL = URL(string: url.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? url) else {
+        guard let metadata = FilenCrypto.shared.decryptFileMetadata(metadata: fileInfo.metadata, masterKeys: masterkeys) else {
             throw FilenError.noSuchFile
         }
         
         let itemJSON = ItemJSON(uuid: fileInfo.uuid, parent: fileInfo.parent, name: metadata.name, type: "file", mime: metadata.mime ?? "", size: metadata.size ?? 0, timestamp: fileInfo.timestamp, lastModified: metadata.lastModified ?? 0, key: metadata.key, chunks: fileInfo.chunks, region: fileInfo.region, bucket: fileInfo.bucket, version: fileInfo.version)
         
+        return try await downloadFile(itemJSON: itemJSON, url: url)
+    }
+    
+    public func downloadFile(itemJSON: ItemJSON, url: String, maxChunks: Int? = nil, progress: Progress = Progress()) async throws -> (didDownload: Bool, url: String) {
+        let maxChunks = maxChunks ?? itemJSON.chunks
+        if (maxChunks <= 0) {
+            return (didDownload: false, url: "")
+        }
+        
+        guard let destinationURL = URL(string: url.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? url) else {
+            throw FilenError.noSuchFile
+        }
         let destinationBaseURL = destinationURL.deletingLastPathComponent()
         
         print(destinationBaseURL.path)
@@ -715,8 +708,9 @@ extension FilenClient: @unchecked Sendable
             return (didDownload: false, url: url)
         }
         
+        progress.totalUnitCount = Int64(chunksToDownload)
+
         try await withThrowingTaskGroup(of: Void.self) { group in
-            print(chunksToDownload)
             for index in 0..<chunksToDownload {
                 autoreleasepool {
                     group.addTask { @Sendable in
@@ -786,10 +780,10 @@ extension FilenClient: @unchecked Sendable
                                 }
                             }
                             dispatch.wait()
+                            progress.completedUnitCount = Int64(index + 1)
                         }
                     }
                 }
-                
             }
             for try await _ in group {}
         }
