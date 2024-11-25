@@ -116,59 +116,57 @@ public class FilenClient {
     func apiRequest <T: Decodable & Sendable>(endpoint: String, method: HTTPMethod, body: Encodasenable?, apiKey: String? = nil) async throws -> T {
         let ret: FilenResponse<T> = try await apiRequestBaseAPI(endpoint: endpoint, method: method, body: body, apiKey: apiKey)
         guard let data = ret.data else {
-            throw FilenError(ret.message)
+            throw FilenError.determineErrorMessage(fromCode: ret.code)
         }
         return data
     }
     
     public func decryptFolderName(name: String) throws -> String {
         guard let masterKeys = config?.masterKeys else {
-            throw FilenError("Not logged in")
+            throw FilenError.notLoggedIn
         }
-        print("Attempting \(name) decyrpt with \(masterKeys)")
         return FilenCrypto.shared.decryptFolderName(metadata: name, masterKeys: masterKeys) ?? name
     }
     
     public func decryptFileName(metadata: String) throws -> String {
         guard let masterKeys = config?.masterKeys else {
-            throw FilenError("Not logged in")
+            throw FilenError.notLoggedIn
         }
-        print("Attempting \(metadata) decyrpt with \(masterKeys)")
         return FilenCrypto.shared.decryptFileMetadata(metadata: metadata, masterKeys: masterKeys)?.name ?? metadata
     }
 }
 
-public final class FilenError : LocalizedError {
-    let description: String
+public enum FilenError : LocalizedError {
+    case notLoggedIn
+    case saltRequired
+    case invalidAuthVersion
+    case masterKeyMissing
+    case apiKeyMissing
+    case failedSerialization
+    case noSuchFile
+    case unauthorized
+    case zeroByteFile
+    case serverUnreachable
+    case missingConfigFile
     
-    init(_ description: String) {
-        self.description = description
-    }
+    case folderNotFound
+    case fileNotFound
     
-    public var errorDescription: String? {
-        get {
-            return self.description
+    case unknown(String)
+    
+    public static func determineErrorMessage(fromCode code: String) -> FilenError {
+        switch code {
+        case "file_not_found":
+            return .fileNotFound
+        case "folder_not_found":
+            return .folderNotFound
+        default:
+            return .unknown(code)
         }
     }
 }
 
-/*
- {
-     "email": "",
-     "password": "",
-     "masterKeys": [""],
-     "apiKey": "",
-     "publicKey": "",
-     "privateKey": "",
-     "authVersion": 2,
-     "baseFolderUUID": "",
-     "userId": 0
- }
-
- */
 public struct SDKConfiguration : Decodable {
-//    let email: String
-//    let password: String
     public let masterKeys: [String]
     public let apiKey: String
     var publicKey: String? = nil
@@ -176,23 +174,12 @@ public struct SDKConfiguration : Decodable {
     let authVersion: Int
     public var baseFolderUUID: String? = nil
     public var userId: Int? = nil
-    
-    public init(masterKeys: [String], apiKey: String, publicKey: String, privateKey: String, authVersion: Int, baseFolderUUID: String, userId: Int) {
-//        self.email = email
-//        self.password = password
-        self.masterKeys = masterKeys
-        self.apiKey = apiKey
-        self.publicKey = publicKey
-        self.privateKey = privateKey
-        self.authVersion = authVersion
-        self.baseFolderUUID = baseFolderUUID
-        self.userId = userId
-    }
-    
-    public init(masterKeys: [String], apiKey: String) {
+}
+
+public extension SDKConfiguration {
+    init(masterKeys: [String], apiKey: String) {
         self.masterKeys = masterKeys
         self.apiKey = apiKey
         self.authVersion = 2
     }
 }
-

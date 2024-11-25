@@ -12,33 +12,33 @@ import UniformTypeIdentifiers
 extension FilenClient: @unchecked Sendable
 {
     public func createFolder (name: String, parent: String) async throws -> String {
-      guard let masterKeys = self.masterKeys() else {
-          throw FilenError("Maaster kesy are not set.")
-      }
-      
-      let encryptedName = try FilenCrypto.shared.encryptFolderName(name: FolderMetadata(name: name), masterKeys: masterKeys)
-      let nameHashed = try FilenCrypto.shared.hashFn(message: name.lowercased())
-      
-      let uuid = UUID().uuidString.lowercased()
-      
-      let response: CreateFolder = try await self.apiRequest(
-        endpoint: "/v3/dir/create",
-        method: .post,
-        body: [
-          "uuid": uuid,
-          "name": encryptedName,
-          "nameHashed": nameHashed,
-          "parent": parent
-        ]
-      )
-      
+        guard let masterKeys = self.masterKeys() else {
+            throw FilenError.masterKeyMissing
+        }
+        
+        let encryptedName = try FilenCrypto.shared.encryptFolderName(name: FolderMetadata(name: name), masterKeys: masterKeys)
+        let nameHashed = try FilenCrypto.shared.hashFn(message: name.lowercased())
+        
+        let uuid = UUID().uuidString.lowercased()
+        
+        let response: CreateFolder = try await self.apiRequest(
+            endpoint: "/v3/dir/create",
+            method: .post,
+            body: [
+                "uuid": uuid,
+                "name": encryptedName,
+                "nameHashed": nameHashed,
+                "parent": parent
+            ]
+        )
+        
         try await checkIfItemParentIsShared(
-          type: "folder",
-          parent: parent,
-          itemMetadata: CheckIfItemParentIsSharedMetadata(
-            uuid: uuid,
-            name: name
-          )
+            type: "folder",
+            parent: parent,
+            itemMetadata: CheckIfItemParentIsSharedMetadata(
+                uuid: uuid,
+                name: name
+            )
         )
         
         return response.uuid
@@ -46,7 +46,7 @@ extension FilenClient: @unchecked Sendable
     
     func uploadChunk (url: URL, fileURL: URL, checksum: String) async throws -> (region: String, bucket: String) {
         guard let apiKey = config?.apiKey else {
-            throw FilenError("API key is not set.")
+            throw FilenError.apiKeyMissing
         }
         
         let headers: HTTPHeaders = [
@@ -55,10 +55,9 @@ extension FilenClient: @unchecked Sendable
             "Checksum": checksum
         ]
         
-        let r = try await sessionManager.upload(fileURL, to: url, headers: headers){ $0.timeoutInterval = 3600 }.validate()
-        print(try await r.serializingString().value)
+        let r = sessionManager.upload(fileURL, to: url, headers: headers){ $0.timeoutInterval = 3600 }.validate()
         guard let response = try await r.serializingDecodable(FilenResponse<UploadChunk>.self).value.data else {
-            throw FilenError("Failed serialize")
+            throw FilenError.failedSerialization
         }
         
         return (region: response.region, bucket: response.bucket)
@@ -72,6 +71,7 @@ extension FilenClient: @unchecked Sendable
             throw NSError(domain: "encryptAndUploadChunk", code: 1, userInfo: nil)
         }
         
+        let dateNow = Date()
         let (_, checksum: chunkChecksum) = try FilenCrypto.shared.streamEncryptData(input: inputURL, output: fileURL, key: key, version: 2, index: index)
         
         // We need to serialize it to JSON this way to ensure correct ordering of parameters
@@ -83,7 +83,11 @@ extension FilenClient: @unchecked Sendable
             throw NSError(domain: "encryptAndUploadChunk", code: 2, userInfo: nil)
         }
         
+        //        try await self.transferSemaphore.acquire()
+        print("Uploading chunk \(index) for \(uuid)")
         let result = try await self.uploadChunk(url: urlWithComponents, fileURL: fileURL, checksum: queryItemsChecksum)
+        print("Took \(Date().timeIntervalSince(dateNow)) to encrypt and upload")
+        //        transferSemaphore.release()
         
         if FileManager.default.fileExists(atPath: fileURL.path) {
             try FileManager.default.removeItem(atPath: fileURL.path)
@@ -107,11 +111,11 @@ extension FilenClient: @unchecked Sendable
     
     public func uploadFile (url: String, parent: String) async throws -> ItemJSON {
         if (!FileManager.default.fileExists(atPath: url)) {
-            throw FilenError("No such file")
+            throw FilenError.noSuchFile
         }
         
         guard let masterKeys = self.masterKeys(), let lastMasterKey = masterKeys.last else {
-            throw FilenError("Unauthorized")
+            throw FilenError.unauthorized
         }
         
         try await self.uploadSemaphore.acquire()
@@ -123,14 +127,14 @@ extension FilenClient: @unchecked Sendable
         let stat = try FileManager.default.attributesOfItem(atPath: url)
         
         guard let fileSize = stat[.size] as? Int, let fileURL = URL(string: url.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? url), let lastModified = stat[.modificationDate] as? Date else {
-            throw FilenError("No such item")
+            throw FilenError.noSuchFile
         }
         
         let key = try FilenCrypto.shared.generateRandomString(length: 32)
         let lastModifiedInt = Int(lastModified.timeIntervalSince1970 * 1000)
         
         if (fileSize <= 0) { // We do not support 0 Byte files yet
-            throw FilenError("0 Byte Files are not supported")
+            throw FilenError.zeroByteFile
         }
         
         let uuid = UUID().uuidString.lowercased()
@@ -157,7 +161,7 @@ extension FilenClient: @unchecked Sendable
         )
         
         guard let metadataJSONString = String(data: metadataJSON, encoding: .utf8) else {
-            throw FilenError("No such item")
+            throw FilenError.noSuchFile
         }
         
         let rm = try FilenCrypto.shared.generateRandomString(length: 32)
@@ -170,21 +174,19 @@ extension FilenClient: @unchecked Sendable
         
         let uploadFileResult = UploadFileResult()
         
+        let maxUploadTasks = 50
+        
         try await withThrowingTaskGroup(of: Void.self) { group in
             for index in 0..<fileChunks {
-                autoreleasepool {
-                    group.addTask { @Sendable in
-                        try await self.transferSemaphore.acquire()
-
-                        defer {
-                            self.transferSemaphore.release()
-                        }
-                        
-                        let result = try await self.encryptAndUploadChunk(url: url, chunkSize: chunkSizeToUse, uuid: uuid, index: index, uploadKey: uploadKey, parent: parent, key: key)
-//                        
-                        if (result.bucket.count > 0 && result.region.count > 0) {
-                            await uploadFileResult.set(bucket: result.bucket, region: result.region)
-                        }
+                if index >= maxUploadTasks {
+                    try await group.next()
+                }
+                
+                group.addTask { @Sendable in
+                    let result = try await self.encryptAndUploadChunk(url: url, chunkSize: chunkSizeToUse, uuid: uuid, index: index, uploadKey: uploadKey, parent: parent, key: key)
+                    
+                    if (result.bucket.count > 0 && result.region.count > 0) {
+                        await uploadFileResult.set(bucket: result.bucket, region: result.region)
                     }
                 }
             }
@@ -288,8 +290,6 @@ extension FilenClient: @unchecked Sendable
             ]
         )
         
-        
-        
         return response
     }
     
@@ -301,8 +301,6 @@ extension FilenClient: @unchecked Sendable
                 "uuid": uuid
             ]
         )
-        
-        
         
         return response
     }
@@ -319,8 +317,6 @@ extension FilenClient: @unchecked Sendable
                 "metadata": metadata
             ]
         )
-        
-        
     }
     
     func addItemToPublicLink (uuid: String, parent: String, linkUUID: String, type: String, metadata: String, key: String, expiration: String) async throws -> Void {
@@ -407,7 +403,7 @@ extension FilenClient: @unchecked Sendable
     
     func checkIfItemIsSharedForRename (uuid: String, type: String, itemMetadata: CheckIfItemParentIsSharedMetadata) async throws -> Void {
         guard let masterKeys = self.masterKeys() else {
-            throw FilenError("Not logged in")
+            throw FilenError.notLoggedIn
         }
         
         let isSharingItem = try await self.isSharingItem(uuid: uuid)
@@ -448,7 +444,7 @@ extension FilenClient: @unchecked Sendable
     
     func checkIfItemParentIsShared (type: String, parent: String, itemMetadata: CheckIfItemParentIsSharedMetadata) async throws -> Void {
         guard let masterKeys = self.masterKeys() else {
-            throw FilenError("Not logged in")
+            throw FilenError.notLoggedIn
         }
         
         let isSharingParent = try await self.isSharingFolder(uuid: parent)
@@ -649,46 +645,13 @@ extension FilenClient: @unchecked Sendable
         }
     }
     
-    func downloadAndDecryptChunk (uuid: String, region: String, bucket: String, index: Int, key: String, version: Int) async throws -> URL {
-        guard let downloadURL = URL(string: "\(egestUrls.randomElement()!)/\(region)/\(bucket)/\(uuid)/\(index)") else {
-            throw FilenError("Server unreachable")
-        }
-        
-        let tempFileURL = self.getTempPath().appendingPathComponent(UUID().uuidString.lowercased() + "." + uuid + "." + String(index), isDirectory: false)
-        let downloadedFileURL = try await sessionManager.download(downloadURL){ $0.timeoutInterval = 3600 }.validate().serializingDownloadedFileURL().value
-        
-        defer {
-            do {
-                if FileManager.default.fileExists(atPath: downloadedFileURL.path) {
-                    try FileManager.default.removeItem(at: downloadedFileURL)
-                }
-            } catch {
-                print(error)
-            }
-        }
-        
-        _ = try FilenCrypto.shared.streamDecryptData(input: downloadedFileURL, output: tempFileURL, key: key, version: version)
-        
-        return tempFileURL
-    }
-    
     func downloadChunk (uuid: String, region: String, bucket: String, index: Int, key: String, version: Int) async throws -> (downloadedFileURL: URL, shouldTempFileURL: URL) {
         guard let downloadURL = URL(string: "\(egestUrls.randomElement()!)/\(region)/\(bucket)/\(uuid)/\(index)") else {
-            throw FilenError("Server unreachable")
+            throw FilenError.serverUnreachable
         }
         
         let tempFileURL = self.getTempPath().appendingPathComponent(UUID().uuidString.lowercased() + "." + uuid + "." + String(index), isDirectory: false)
         let downloadedFileURL = try await sessionManager.download(downloadURL){ $0.timeoutInterval = 3600 }.validate().serializingDownloadedFileURL().value
-        
-//        defer {
-//            do {
-//                if FileManager.default.fileExists(atPath: downloadedFileURL.path) {
-//                    try FileManager.default.removeItem(at: downloadedFileURL)
-//                }
-//            } catch {
-//                print(error)
-//            }
-//        }
         
         return (downloadedFileURL: downloadedFileURL, shouldTempFileURL: tempFileURL)
     }
@@ -705,11 +668,11 @@ extension FilenClient: @unchecked Sendable
         }
         
         guard let masterkeys = masterKeys() else {
-            throw FilenError("No master keys")
+            throw FilenError.masterKeyMissing
         }
         
         guard let metadata = FilenCrypto.shared.decryptFileMetadata(metadata: fileInfo.metadata, masterKeys: masterkeys), let destinationURL = URL(string: url.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? url) else {
-            throw FilenError("No such item")
+            throw FilenError.noSuchFile
         }
         
         let itemJSON = ItemJSON(uuid: fileInfo.uuid, parent: fileInfo.parent, name: metadata.name, type: "file", mime: metadata.mime ?? "", size: metadata.size ?? 0, timestamp: fileInfo.timestamp, lastModified: metadata.lastModified ?? 0, key: metadata.key, chunks: fileInfo.chunks, region: fileInfo.region, bucket: fileInfo.bucket, version: fileInfo.version)
@@ -752,7 +715,6 @@ extension FilenClient: @unchecked Sendable
             return (didDownload: false, url: url)
         }
         
-                
         try await withThrowingTaskGroup(of: Void.self) { group in
             print(chunksToDownload)
             for index in 0..<chunksToDownload {
@@ -777,28 +739,28 @@ extension FilenClient: @unchecked Sendable
                             try FileManager.default.removeItem(at: downloadedChunkInfo.downloadedFileURL)
                         }
                         
-                            defer {
-                                do {
-                                    if FileManager.default.fileExists(atPath: decryptedChunkURL.path) {
-                                        try FileManager.default.removeItem(at: decryptedChunkURL)
-                                    }
-                                } catch {
-                                    print(error)
+                        defer {
+                            do {
+                                if FileManager.default.fileExists(atPath: decryptedChunkURL.path) {
+                                    try FileManager.default.removeItem(at: decryptedChunkURL)
                                 }
+                            } catch {
+                                print(error)
                             }
-                            
-                            guard let readStream = InputStream(fileAtPath: decryptedChunkURL.path) else {
-                                throw NSError(domain: "Could not open read stream", code: 1, userInfo: nil)
-                            }
-                            defer {
-                                readStream.close()
-                            }
-                            readStream.open()
-                            
-                            let bufferSize = 1024
-                            var buffer = [UInt8](repeating: 0, count: bufferSize)
-                            var tmpOffset: Int64 = 0
-                            
+                        }
+                        
+                        guard let readStream = InputStream(fileAtPath: decryptedChunkURL.path) else {
+                            throw NSError(domain: "Could not open read stream", code: 1, userInfo: nil)
+                        }
+                        defer {
+                            readStream.close()
+                        }
+                        readStream.open()
+                        
+                        let bufferSize = 1024
+                        var buffer = [UInt8](repeating: 0, count: bufferSize)
+                        var tmpOffset: Int64 = 0
+                        
                         autoreleasepool {
                             let dispatch = DispatchGroup()
                             while readStream.hasBytesAvailable {
@@ -815,7 +777,7 @@ extension FilenClient: @unchecked Sendable
                                             } else if (err != 0) {
                                                 print("ERROR \(err) at \(1024 * 1024 * Int64(index) + tmpOffset)")
                                             }
-
+                                            
                                             dispatch.leave()
                                         })
                                         tmpOffset += bytesRead
@@ -825,17 +787,6 @@ extension FilenClient: @unchecked Sendable
                             }
                             dispatch.wait()
                         }
-                        
-                        
-//                        try await waitForWriteSlot(index: index)
-//                        
-//                        if index == 0 {
-//                            try FileManager.default.moveItem(atPath: decryptedChunkURL.path, toPath: tempFileURL.path)
-//                        } else {
-//                            try FilenUtils.shared.appendFile(from: decryptedChunkURL, to: tempFileURL)
-//                        }
-//                        
-//                        await currentWriteIndex.increase()
                     }
                 }
                 
@@ -844,20 +795,9 @@ extension FilenClient: @unchecked Sendable
         }
         
         dIo?.close()
-        /*for index in 0..<chunksToDownload  {
-         try await self.downloadAndDecryptChunk(
-         destinationURL: tempFileURL,
-         uuid: uuid,
-         region: itemJSON.region,
-         bucket: itemJSON.bucket,
-         index: index,
-         key: itemJSON.key,
-         version: itemJSON.version
-         )
-         }*/
         
         if !FileManager.default.fileExists(atPath: tempFileURL.path) {
-            throw FilenError("Server unreachable")
+            throw FilenError.serverUnreachable
         }
         
         try FileManager.default.moveItem(atPath: tempFileURL.path, toPath: destinationURL.path)
@@ -865,22 +805,6 @@ extension FilenClient: @unchecked Sendable
         return (didDownload: true, url: url)
     }
 }
-
-//extension BodyStringEncoding {
-//  enum Errors: Error {
-//    case emptyURLRequest
-//    case encodingProblem
-//  }
-//}
-//
-//extension BodyStringEncoding.Errors: LocalizedError {
-//  var errorDescription: String? {
-//    switch self {
-//      case .emptyURLRequest: return "Empty url request"
-//      case .encodingProblem: return "Encoding problem"
-//    }
-//  }
-//}
 
 actor DownloadFileCurrentWriteIndex {
     var index = 0

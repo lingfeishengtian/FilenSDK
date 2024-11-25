@@ -1314,7 +1314,7 @@ final class FilenCrypto : Sendable {
             return (derivedMasterKeys, derivedPassword)
         } else if authVersion == 2 {
             guard let salt else {
-                throw FilenError("Salt is required for authVersion 2")
+                throw FilenError.saltRequired
             }
             let derivedKey = try deriveKeyFromPassword(password: rawPassword, salt: salt, bitLength: 512, hash: .sha512, rounds: 200000)
             let middleIndex = derivedKey.index(derivedKey.startIndex, offsetBy: derivedKey.count / 2)
@@ -1323,7 +1323,7 @@ final class FilenCrypto : Sendable {
             let hashedDerivedPassword = try hash(message: derivedPassword, hash: .sha512)
             return (derivedMasterKeys, hashedDerivedPassword.hexToData()!.toHex())
         } else {
-            throw FilenError("Invalid authVersion: \(authVersion)")
+            throw FilenError.invalidAuthVersion
         }
     }
 }
